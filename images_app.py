@@ -19,6 +19,7 @@ from datetime import datetime
 import json
 import io
 import base64
+import requests
 
 # Analysis libraries
 try:
@@ -1510,138 +1511,145 @@ def admin_panel():
 # SURVEY PAGE
 # ============================================================================
 
-def survey_page():
-    """Main survey interface"""
-    survey_title = get_setting('survey_title', 'Touchless Satisfaction Survey')
-    st.title(f"✋ {survey_title}")
-    
-    # Sidebar
+def predict_species(pil_img):
+    """Heuristic classifier for Penguin vs Eagle.
+
+    Returns (label, confidence) where label is 'Penguin' or 'Eagle' and
+    confidence is a float between 0 and 1.
+    This uses simple color/brightness heuristics — not a substitute for a
+    trained model but works reasonably for clear photos.
+    """
+    try:
+        import numpy as _np
+    except Exception:
+        return "Unknown", 0.0
+
+    try:
+        img = pil_img.resize((224, 224)).convert('RGB')
+        arr = _np.asarray(img).astype(_np.float32)
+
+        # Brightness-based features
+        gray = _np.mean(arr, axis=2)
+        white_frac = _np.mean(gray > 220)
+        dark_frac = _np.mean(gray < 50)
+
+        # Brown / golden color heuristic (eagles often brown/golden)
+        r, g, b = _np.mean(arr, axis=(0, 1))
+        brown_mask = (arr[:, :, 0] > 100) & (arr[:, :, 1] > 40) & (arr[:, :, 2] < 120) & ((arr[:, :, 0] - arr[:, :, 1]) > 10)
+        brown_frac = _np.mean(brown_mask)
+
+        # Decision rules
+        # Penguins: noticeable white + dark contrast, low brown fraction
+        if (white_frac > 0.06 and dark_frac > 0.06 and brown_frac < 0.12):
+            # confidence grows with combined white+dark fraction
+            conf = min(0.99, 0.4 + (white_frac + dark_frac) * 2.5)
+            return "Penguin", float(conf)
+
+        # Eagles: moderate-to-high brown fraction
+        if brown_frac > 0.10:
+            conf = min(0.98, 0.35 + brown_frac * 3.0)
+            return "Eagle", float(conf)
+
+        # Fallback: compare mean color with sample means (fetch samples)
+        sample_means = {}
+        urls = {
+            'Penguin': 'https://upload.wikimedia.org/wikipedia/commons/7/76/Black-footed_penguin.jpg',
+            'Eagle': 'https://upload.wikimedia.org/wikipedia/commons/1/1b/Bald_Eagle_Portrait.jpg'
+        }
+        try:
+            for k, u in urls.items():
+                resp = requests.get(u, timeout=8)
+                im = Image.open(io.BytesIO(resp.content)).resize((224, 224)).convert('RGB')
+                ma = _np.mean(_np.asarray(im), axis=(0, 1))
+                sample_means[k] = ma
+
+            mean_rgb = _np.array([r, g, b])
+            dists = {k: _np.linalg.norm(mean_rgb - v) for k, v in sample_means.items()}
+            label = min(dists, key=dists.get)
+            # confidence based on normalized distance
+            dist_values = _np.array(list(dists.values()))
+            maxd = dist_values.max() if dist_values.size else 1.0
+            conf = 1.0 - (dists[label] / (maxd + 1e-6))
+            conf = float(min(0.95, max(0.15, conf)))
+            return label, conf
+        except Exception:
+            return "Unknown", 0.0
+
+
+def bird_page():
+    """Simple Penguin / Eagle image viewer (replaces survey page)."""
+    st.title("🐧 🦅 Bird Viewer")
+
+    # Sidebar with instructions
     with st.sidebar:
-        st.header("📋 Instructions")
-        st.markdown("""
-        **Gesture Guide:**
-        
-        ❤️ Heart = Very Satisfied (5)
-        👍 Thumbs Up = Satisfied (4)  
-        👎 Thumbs Down = Unsatisfied (2)
-        ☝️ Waving = Very Unsatisfied (1)
-        ✊ Fist = No Answer
-        """)
-        
-        st.info("Show clear hand gestures for best results!")
-    
-    # Initialize session
-    if 'started' not in st.session_state:
-        st.session_state.started = False
-        st.session_state.current_q = 0
-        st.session_state.responses = []
-        st.session_state.completed = False
-    
-    # Start screen
-    if not st.session_state.started:
-        st.markdown("## Welcome!")
-        st.markdown("Please provide your information to begin the survey.")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            name = st.text_input("Your Name:")
-        with col2:
-            org = st.text_input("Organization:")
-        
-        if st.button("🚀 Start Survey", type="primary"):
-            st.session_state.name = name or "Anonymous"
-            st.session_state.org = org or "N/A"
-            st.session_state.started = True
-            st.rerun()
-        return
-    
-    # Completed screen
-    if st.session_state.completed:
-        st.success("✅ Survey Complete!")
-        st.balloons()
-        
-        st.markdown("## Your Responses")
-        
-        df = pd.DataFrame([{
-            'Question': f"Q{i+1}",
-            'Response': r['label'],
-            'Score': r['score'] or 'N/A',
-            'Confidence': f"{r['confidence']:.1%}"
-        } for i, r in enumerate(st.session_state.responses)])
-        
-        st.dataframe(df, use_container_width=True)
-        
-        scores = [r['score'] for r in st.session_state.responses if r['score']]
-        if scores:
-            avg_score = sum(scores)/len(scores)
-            st.metric("Your Average Score", f"{avg_score:.2f}/5.0")
-            
-            if avg_score >= 4:
-                st.success("🎉 Thank you for your positive feedback!")
-            elif avg_score >= 3:
-                st.info("👍 Thank you for your feedback!")
-            else:
-                st.warning("We appreciate your honest feedback and will work to improve!")
-        
-        if st.button("📝 Submit Another Response"):
-            st.session_state.started = False
-            st.session_state.current_q = 0
-            st.session_state.responses = []
-            st.session_state.completed = False
-            st.rerun()
-        return
-    
-    # Survey in progress
-    current_q = st.session_state.current_q
-    total_q = len(SURVEY_QUESTIONS)
-    
-    st.progress(current_q / total_q, text=f"Question {current_q + 1} of {total_q}")
-    
-    st.markdown(f"## Question {current_q + 1}")
-    st.markdown(f"### {SURVEY_QUESTIONS[current_q]}")
-    
+        st.header("Viewer Options")
+        st.markdown("Choose a bird below or upload your own image to view/download.")
+
+    # Choose species
+    species = st.selectbox("Select species:", options=["Penguin", "Eagle"])
+
+    # Example image URLs (fallback)
+    sample_images = {
+        'Penguin': 'https://upload.wikimedia.org/wikipedia/commons/7/76/Black-footed_penguin.jpg',
+        'Eagle': 'https://upload.wikimedia.org/wikipedia/commons/1/1b/Bald_Eagle_Portrait.jpg'
+    }
+
+    st.markdown(f"## {species}")
+
+    # Upload or use sample
     col1, col2 = st.columns([2, 1])
-    
     with col1:
-        img_file = st.camera_input("Show your gesture", key=f"cam_{current_q}")
-        
-        if img_file:
-            image = Image.open(img_file)
-            
-            with st.spinner("Analyzing gesture..."):
-                gesture, confidence = simple_predict(image)
-            
-            info = GESTURE_MAP[gesture]
-            
-            st.success(f"Detected: {info['emoji']} {info['label']}")
-            st.info(f"Confidence: {confidence:.1%}")
-            
-            if st.button("✅ Confirm", type="primary"):
-                st.session_state.responses.append({
-                    'label': info['label'],
-                    'score': info['score'],
-                    'confidence': confidence
-                })
-                
-                if current_q < total_q - 1:
-                    st.session_state.current_q += 1
-                    st.rerun()
-                else:
-                    st.session_state.completed = True
-                    
-                    # Save to database
-                    save_response(
-                        st.session_state.name,
-                        st.session_state.org,
-                        st.session_state.responses
-                    )
-                    
-                    st.rerun()
-    
+        uploaded = st.file_uploader("Upload an image (optional):", type=['png', 'jpg', 'jpeg'])
+        if uploaded:
+            image = Image.open(uploaded).convert('RGB')
+        else:
+            # Fetch sample image
+            try:
+                resp = requests.get(sample_images[species], timeout=10)
+                image = Image.open(io.BytesIO(resp.content)).convert('RGB')
+            except Exception:
+                st.error("Could not load sample image. Please upload an image.")
+                return
+
     with col2:
-        st.markdown("**Gestures:**")
-        for g, info in GESTURE_MAP.items():
-            st.write(f"{info['emoji']} {info['label']}")
+        st.markdown("**Options**")
+        gray = st.checkbox("Grayscale")
+        rotate = st.slider("Rotate (degrees):", min_value=0, max_value=360, value=0)
+
+    # Apply simple transforms
+    img_disp = image.copy()
+    if gray:
+        img_disp = img_disp.convert('L').convert('RGB')
+    if rotate:
+        img_disp = img_disp.rotate(rotate, expand=True)
+
+    st.image(img_disp, use_column_width=True, caption=f"{species} image")
+
+    # Predict species (simple heuristic)
+    pred_label, pred_conf = predict_species(img_disp)
+    if pred_label == "Unknown":
+        st.warning("Could not determine species from the image.")
+    else:
+        emoji = '🐧' if pred_label == 'Penguin' else '🦅'
+        st.success(f"Prediction: {emoji} {pred_label} — Confidence: {pred_conf:.0%}")
+
+        # Compare with user selection
+        if pred_label == species:
+            st.info("Prediction matches the selected species.")
+        else:
+            st.info("Prediction differs from selected species — trust the model's output above.")
+
+    # Download button
+    buffered = io.BytesIO()
+    img_disp.save(buffered, format='PNG')
+    buffered.seek(0)
+    st.download_button("📥 Download Image", data=buffered, file_name=f"{species.lower()}_image.png", mime='image/png')
+
+    # Short description
+    if species == 'Penguin':
+        st.info("Penguins are flightless seabirds adapted to life in the water.")
+    else:
+        st.info("Eagles are large birds of prey known for their keen eyesight and powerful flight.")
 
 # ============================================================================
 # MAIN APP
@@ -1656,13 +1664,13 @@ def main():
         st.markdown("---")
         page = st.radio(
             "Navigation",
-            ["📝 Survey", "🔧 Admin Panel"],
+            ["🐧/🦅 Viewer", "🔧 Admin Panel"],
             label_visibility="collapsed"
         )
     
     # Route to appropriate page
-    if page == "📝 Survey":
-        survey_page()
+    if page == "🐧/🦅 Viewer":
+        bird_page()
     else:
         admin_panel()
 
