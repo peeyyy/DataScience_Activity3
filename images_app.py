@@ -1524,8 +1524,8 @@ def survey_page():
         ❤️ Heart = Very Satisfied (5)
         👍 Thumbs Up = Satisfied (4)  
         👎 Thumbs Down = Unsatisfied (2)
-        ☝️ Waving = Very Unsatisfied (1)
-        ✊ Fist = No Answer
+        ✊ Fist = Very Unsatisfied (1)
+        ☝️ Waving = No Answer
         """)
         
         st.info("Show clear hand gestures for best results!")
